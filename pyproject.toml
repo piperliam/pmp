@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pmp"             
+version = "0.0.1"                    
+description = "Mission simulation framework for Spacecraft missions based on MAGPIE and other interplanetary missions"
+readme = "README.md"
+requires-python = ">=3.9"
+
+authors = [
+  { name = "Liam Piper", email = "liamatpm@gmail.com" }
+]
+
+license = { text = "MIT" }            # or use "License :: OSI Approved :: MIT License" in classifiers
+
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering"
+]
+
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "astropy>=5.3",
+  "poliastro>=0.17,<0.18",
+
+]
+
+[project.urls]
+Homepage = "https://github.com/piperliam/pmp"
+Source = "https://github.com/piperliam/pmp"
+Issues = "https://github.com/piperliam/pmp/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pmp"]
+
