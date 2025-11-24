@@ -1,0 +1,40 @@
+pmp/
+  __init__.py
+  cli.py
+
+  trajectory/
+    transfer.py
+    adcs.py
+
+  power/
+    probe_env.py
+    orbiter_eps.py
+
+  edl/
+    edl_1d.py
+
+  comms/
+    link_mars.py
+
+  seasons/
+    mars_seasons.py
+
+  missions/
+    magpie/
+      __init__.py      # MAGPIE baseline mission orchestrator
+
+  legacy/
+    ADCS_0.2a.py
+    antenna_0.4.py
+    CFD_0.2.py
+    comm1d.py
+    hex_v1.2a.py
+    orbit_1.4c.py
+    orbiter_EPS_0.1.py
+    probe_sim_v0.3a.py
+    reentry_2.1c.py
+    season_calc.py
+
+pmp_gui.py
+pyproject.toml
+README.md

@@ -1,0 +1,584 @@
+
+Piper Mission Planner (PMP) – Architecture & Development Roadmap
+================================================================
+
+Version: draft-0.1
+Date: TBD
+
+This document describes:
+- The current structure of the Piper Mission Planner (PMP) library.
+- What each module does today.
+- Known limitations.
+- A roadmap of improvements needed to make PMP capable of simulating *any* mission for its entire duration (from launch to end-of-life operations).
+
+
+0. High-Level Goals
+-------------------
+
+PMP is intended to be a reusable mission-planning and simulation framework, **not** a one-off Mars mission script. Design goals:
+
+1. **Mission-agnostic**:
+   - Should work for Earth–Mars, Mars–Neptune, Earth–Venus, lunar missions, outer planet tours, etc.
+   - No hard-coded “MAGPIE-only” assumptions in the core modules.
+
+2. **Modular subsystems**:
+   - Trajectory & astrodynamics (Lambert transfers, orbit propagation).
+   - Entry–Descent–Landing (EDL).
+   - Power & thermal (orbiter EPS and surface assets).
+   - Comms & link budgets.
+   - ADCS & slew / nadir-hold behavior.
+   - Geometry / seasons / environment models.
+
+3. **Separation of concerns**:
+   - Framework code in `pmp/` is **generic**.
+   - MAGPIE-specific logic lives in `pmp/missions/magpie/` or `pmp/legacy/`.
+   - GUI is just a front-end to the framework.
+
+4. **End-to-end mission simulation**:
+   - Eventually simulate an entire mission timeline (launch → transfer → insertion → deployment → surface ops → end-of-life) using a unified configuration and scheduler.
+   - Support long-duration ops (months/years), with coarse and fine time steps where needed.
+
+
+1. Repository Layout
+--------------------
+
+Suggested high-level structure:
+
+pmp/
+  __init__.py
+  cli.py                # CLI entrypoint for command-line usage
+
+  trajectory/
+    __init__.py
+    transfer.py         # Generic Lambert transfer engine (any two bodies)
+    adcs.py             # ADCS framework wrapper built around MAGPIE ADCS code
+    # (Future: propagators, multi-body, LV ascent, etc.)
+
+  power/
+    __init__.py
+    probe_env.py        # Probe environment + power + thermal wrapper
+    orbiter_eps.py      # Generic orbiter EPS simulator
+
+  edl/
+    __init__.py
+    edl_1d.py           # Generic 1D EDL kernel (ballistic + chute + retro)
+
+  comms/
+    __init__.py
+    link_mars.py        # Current probe–orbiter + deep-space links (Mars-flavored)
+
+  seasons/
+    __init__.py
+    mars_seasons.py     # Mars Ls + seasonal info from marstime
+
+  missions/
+    __init__.py
+    magpie/
+      __init__.py
+      # (Future: MAGPIE-specific orchestration that calls core PMP modules)
+
+  legacy/
+    __init__.py
+    magpie_probe_sim_v0_3a.py  # Original probe env/power/thermal code (unchanged)
+    magpie_adcs_v0_3.py        # Original ADCS code (unchanged)
+    # (Optional future: full reentry_2.1c.py, antenna_0.4.py, etc.)
+
+pmp_gui.py
+pyproject.toml
+README.md
+docs/ (future)
+
+
+2. Current Modules & Capabilities
+---------------------------------
+
+
+2.1 Trajectory – `pmp/trajectory/transfer.py`
+---------------------------------------------
+
+**What it is now**
+
+- A fully generic Lambert-transfer engine:
+  - Works for any two endpoints orbiting a central body (e.g., Sun, Earth).
+  - Endpoints can be:
+    - Poliastro bodies + epochs (uses ephemerides), or
+    - User-specified position/velocity vectors.
+  - Returns:
+    - Departure & arrival state vectors (r, v).
+    - Lambert velocities at departure & arrival.
+    - Δv at departure & arrival.
+    - v_inf at departure/arrival.
+    - Optional MOI Δv for circular capture at given periapsis altitude.
+    - Time-of-flight (TOF).
+
+**What it’s missing**
+
+- No porkchop plot generation or grid sweeps.
+- No explicit launch vehicle modeling (C3, staging, performance constraints).
+- No mission-phase object (it just computes a single transfer leg).
+- No multi-revolution / extended Lambert options.
+- No direct integration of trajectories; relies on Lambert + body ephemerides.
+
+**Improvements needed for “any mission”**
+
+- Add a **Trajectory Leg** abstraction:
+  - `BoundedLeg` (Lambert from body A to body B).
+  - `UnboundedLeg` (coast, flyby, etc.) using numerical propagators.
+- A higher-level `MissionTrajectory` that chains legs into a full mission time history.
+- Porkchop generator:
+  - Function that sweeps departure & arrival windows, calls `compute_lambert_transfer`, and returns 2D grids of Δv, TOF, v_inf, etc.
+- Launch vehicle submodule:
+  - `LVConfig` (mass, Isp, throttling, staging).
+  - Simple ascent model or wrappers to GMAT/External tools.
+  - C3 envelope checks for allowed departure states.
+- Optional alternative solvers:
+  - Finite-burn modeling for upper stages.
+  - Deep-space maneuvers (TCMs) as discrete impulsive/finite burns.
+
+
+2.2 Trajectory – `pmp/trajectory/adcs.py`
+-----------------------------------------
+
+**What it is now**
+
+- A framework wrapper around the MAGPIE ADCS simulation:
+  - `RWClusterConfig` for reaction wheel cluster geometry and limits.
+  - `RigidBodyConfig` for vehicle inertia.
+  - `SlewPDConfig` for simple PD attitude slews.
+  - `simulate_pd_slew()`:
+    - Uses the legacy `RigidBodyWithRWs`, `simulate()`, `compute_rw_power()`.
+    - Returns metrics like settling time, peak power, total energy.
+- MAGPIE presets:
+  - `magpie_default_orbiter_body`, `magpie_default_probe_body`.
+  - `magpie_default_orbiter_rw_cluster`, `magpie_default_probe_rw_cluster`.
+
+**What it’s missing**
+
+- No usage of ADCS in the bigger mission context yet (attitude profile over time).
+- No explicit representation of attitude modes (HGA pointing, nadir pointing, safe-mode).
+- Nadir-hold vs gravity-gradient energy modeling is still only in legacy tables.
+- No link to comms (e.g., HGA pointing enabling/disabling high-rate downlink).
+
+**Improvements needed**
+
+- Add an `AttitudeMode` abstraction:
+  - `SlewMode`, `NadirMode`, `SunPointingMode`, `HGAPointMode`, `SafeMode`.
+- Add a **mode schedule** system:
+  - A timeline of attitude modes, each with duration and constraints.
+- Generalize nadir-hold/energy analysis into a function:
+  - `simulate_nadir_hold_energy(body, orbit, rw_config, horizon) -> energy usage vs altitude/time`.
+- Connect ADCS outputs to:
+  - EPS (RW power consumption vs time).
+  - Comms (link only valid when orientation is within pointing constraints).
+
+
+2.3 Power – `pmp/power/probe_env.py`
+------------------------------------
+
+**What it is now**
+
+- A clean wrapper around `magpie_probe_sim_v0_3a.py` that:
+  - Defines mission-agnostic configs:
+    - `ProbeEnvConfig` (lat, elevation, tau, T_mean, T_swing, etc.).
+    - `ProbePanelConfig`, `ProbeBatteryConfig`, `ProbeThermalConfig`.
+    - `ProbeEnvSimConfig` for the whole simulation.
+  - Runs the legacy sim via `simulate_probe_env_power`.
+  - Returns:
+    - A Pandas DataFrame with time series.
+    - A summary dictionary of mission-relevant metrics.
+
+**What it’s missing**
+
+- The underlying environment model is still **Mars-specific**:
+  - CO₂ atmosphere, Mars day length, Mars solar constant, etc.
+- Mode schedule (science, survival, uplink) is still implemented as module-level global in the legacy code.
+- No clean separation of “body/environment model” from “probe configuration”.
+
+**Improvements needed**
+
+- Introduce a `BodyEnvModel` interface:
+  - Contains:
+    - Solar constant vs distance.
+    - Sky temperature model.
+    - Diurnal temperature profile.
+    - Atmospheric properties (if needed).
+  - Implement `MarsEnvModel`, `LunarEnvModel`, etc.
+- Refactor legacy `run_sim` to:
+  - Accept an environment model object instead of hard-coded Mars constants.
+  - Use explicit mode schedules passed as data, not global variables.
+- Add a `ProbeMissionOps` concept:
+  - Operation modes as first-class objects with power/thermal behavior.
+  - Timeline of modes as a mission-phase input, not hidden inside the sim.
+
+
+2.4 Power – `pmp/power/orbiter_eps.py`
+--------------------------------------
+
+**What it is now**
+
+- A fresh, generic orbiter EPS simulator:
+  - `OrbitLightingConfig` (period, eclipse fraction).
+  - `ArrayConfig` (nameplate power, incidence efficiency, irradiance scaling).
+  - `BatteryConfig` (capacity, SOC limits, efficiencies).
+  - `LoadConfig` (simple constant loads or a custom load function).
+  - `simulate_orbiter_eps`:
+    - Computes per-step battery SOC, generation, loads.
+    - Returns:
+      - Time history DataFrame.
+      - Per-orbit energy table.
+- MAGPIE-like convenience in `magpie_default_eps_config()`.
+
+**What it’s missing**
+
+- No direct link to a real orbit geometry (eclipse fraction is just a scalar input).
+- No load decomposition (e.g., ADCS vs payload vs housekeeping vs communications).
+- No connection to comms schedule (no high-rate downlink events, etc.).
+- No degradation (array aging, battery capacity fade) over long mission durations.
+
+**Improvements needed**
+
+- Add a `LightingProfile` that can be derived from:
+  - An actual orbit propagator (shadow geometry).
+- Create a `LoadProfile` abstraction:
+  - Multiple named loads with time-varying profiles (e.g., RW, heaters, X-band).
+  - Summed into total load internally.
+- Add aging models:
+  - `ArrayDegradationModel` (solar array output vs mission elapsed time).
+  - `BatteryFadeModel` (capacity vs cycle count/temperature).
+- Hook into mission-wide timeline:
+  - EPS should be driven by the same mission scheduler as other subsystems.
+
+
+2.5 EDL – `pmp/edl/edl_1d.py`
+-----------------------------
+
+**What it is now**
+
+- A generic 1D EDL kernel with:
+  - `BodyAtmosphere` (gravity + exponential atmosphere).
+  - `VehicleAeroshell` (mass, Cd, area).
+  - `ParachuteConfig` (Cd, area, deploy conditions).
+  - `RetroConfig` (thrust, Isp, altitude and velocity logic).
+  - `EDLSimConfig` + `simulate_edl`:
+    - Integrates vertical trajectory with drag, gravity, and optional retro burn.
+    - Returns time series and a list of events (chute deploy, retro start, touchdown).
+- MAGPIE-style presets for Mars body, aeroshell, chute, and retro.
+
+**What it’s missing**
+
+- Horizontal velocity and flight-path angle (single vertical DOF only).
+- No heating model (Sutton–Graves, stagnation heat flux).
+- No detailed staging (backshell separation, drogue, multiple reefing stages).
+- No coupling with probe power/thermal or comms during EDL (e.g., blackout window).
+- No Monte Carlo or dispersion support.
+
+**Improvements needed**
+
+- Extend to 2D or 3DOF EDL:
+  - Add downrange, FPA, bank angle, winds, etc.
+- Add thermal protection subsystem:
+  - Heating flux vs time.
+  - TPS mass loss, ablation, stagnation temperature.
+- Support multi-stage parachutes:
+  - Stage events with dynamic q and Mach corridors.
+- Integrate EDL events into the mission timeline:
+  - EDL should be one phase in the mission scenario, not an isolated sim.
+
+
+2.6 Comms – `pmp/comms/link_mars.py`
+------------------------------------
+
+**What it is now**
+
+- A Mars-centric comms module providing:
+  - Surface probe radio configs (433 MHz, 915 MHz).
+  - Orbiter relay config.
+  - Static pass configuration (bitrate, pass duration).
+  - Deep-space X-band link config (DSN antenna, HGA).
+  - Functions:
+    - `compute_static_probe_orbiter_link` → link margins + static data volume.
+    - `compute_deep_space_link` → deep-space link margins and Eb/N0.
+
+**What it’s missing**
+
+- Mission-agnostic abstraction:
+  - Frequencies, antenna patterns, atmospheres, and link models for other bodies.
+- No dynamic geometry (just static range input).
+- No integration with ADCS (e.g., link only valid if HGA is pointed correctly).
+- No multi-hop / network modeling (e.g., multi-probe crosslinks).
+
+**Improvements needed**
+
+- Abstract comms to:
+  - `RadioConfig`, `AntennaConfig`, `LinkScenario`.
+- Add geometry inputs:
+  - Range vs time; elevation angle vs time (from orbit propagator + surface location).
+- Integrate with mission scheduler:
+  - Pass windows determined from orbital geometry.
+  - Data volume integrated over actual passes.
+- Add network-level modeling:
+  - Basic scheduling of multiple links and resource conflicts (e.g., DSN usage).
+
+
+2.7 Seasons – `pmp/seasons/mars_seasons.py`
+-------------------------------------------
+
+**What it is now**
+
+- A Mars-specific helper to get:
+  - Ls (areocentric solar longitude).
+  - Season names.
+  - Possibly more derived info via marstime.
+
+**What it’s missing**
+
+- Seasons for other bodies (Earth seasons, etc.).
+- No direct coupling to EDL or probe environment (currently use is ad-hoc).
+
+**Improvements needed**
+
+- Introduce generic `SeasonModel`:
+  - Provide body-specific seasonal info (solar incidence, typical temperatures).
+- Hook into environment and power simulation:
+  - Use season to drive environment model parameters (dust tau, temperature baseline, etc.).
+
+
+2.8 GUI – `pmp_gui.py`
+----------------------
+
+**What it is now**
+
+- A portable Tkinter GUI with tabs:
+  - Mission (names, bodies, dates).
+  - Transfer.
+  - Probe Env/Power.
+  - Orbiter EPS.
+  - EDL.
+  - Comms.
+  - ADCS.
+  - Summary.
+- Each tab:
+  - Exposes lots of options as text fields / checkboxes.
+  - Calls relevant PMP modules and displays textual summaries.
+- Supports:
+  - Saving/loading mission configs (json).
+  - Viewing import status.
+
+**What it’s missing**
+
+- Visualization:
+  - No plots of EDL profiles, EPS SOC curves, or transfer trajectories.
+- Tight integration between tabs:
+  - Transfer results are not directly used to set comms ranges or EPS lighting.
+- No “Run full mission” wizard:
+  - Each tab runs in isolation; there’s no single button for an end-to-end simulation.
+- No unit enforcement and limited validation.
+
+**Improvements needed**
+
+- Add plotting support (e.g., matplotlib windows) with:
+  - EDL altitude/velocity/q vs time.
+  - EPS SOC vs orbit.
+  - Probe env/power temperature/power plots.
+- Enhance mission coupling:
+  - Use transfer results to set DSN ranges.
+  - Use mission date + target to drive seasons + env model.
+- Create a “Mission Runner” panel:
+  - A button that executes the core mission pipeline and writes a summary report.
+- Add form validation and unit hints for user friendliness.
+
+
+3. Roadmap to “Any Mission, Full Duration”
+------------------------------------------
+
+To make PMP capable of simulating virtually any mission for its entire duration, several architectural elements need to be added on top of the current modules.
+
+### 3.1 Mission Scenario & Scheduler
+
+Introduce a top-level `MissionScenario` abstraction:
+
+- Holds:
+  - Global parameters:
+    - Central body, mission start date, mission name.
+  - Assets:
+    - Spacecraft objects (orbiter, probes, landers).
+  - Phases:
+    - Transfer phases, orbit insertion, EDL, cruise, surface ops, end-of-life.
+- Includes a generic “timeline” or scheduler:
+  - A list of events:
+    - Maneuvers (Δv or finite burns).
+    - EDL sequences.
+    - Probe deployments.
+    - Attitude mode changes.
+    - Comms windows.
+  - Time can be simulated in:
+    - Continuous numerical integration segments.
+    - Discrete “states” (e.g., stable LMO, surface idle).
+- The scheduler calls subsystem models:
+  - Trajectory → position/orbit.
+  - ADCS → attitude & RW power.
+  - EPS → SOC, load budgets.
+  - Comms → data volumes and margins.
+  - Probe env → surface thermal/power.
+
+**Key improvement:** unify all subsystem simulations under one scenario layer instead of running each subsystem independently.
+
+
+### 3.2 Asset Abstractions
+
+Define common asset types with interfaces:
+
+- `Spacecraft`:
+  - Propulsion config.
+  - EPS config.
+  - ADCS config.
+  - Comms config.
+  - Geometry (for power & attitude).
+- `Lander/Probe`:
+  - EDL model association.
+  - Post-landing EPS + environment model.
+  - Instrument power & data models.
+
+Each asset can be attached to phases:
+- E.g., `MagpieOrbiter` participates in:
+  - Launch & TMI, cruise, MOI, relay orbit, end-of-life disposal.
+- Each `MagpieProbe` participates in:
+  - Deployment, EDL, and surface ops.
+
+
+### 3.3 Multi-body, Multi-leg Trajectories
+
+To handle arbitrary missions:
+
+- Generalize from “one Lambert leg” to a chain of legs:
+  - Each leg can be:
+    - Lambert leg (coast + burn at endpoints).
+    - Coast with small impulsive TCMs.
+    - Gravity assist passes (with simple B-plane approximations).
+- Propagation:
+  - Add a `Propagator` interface for numerical integration:
+    - Keplerian 2-body.
+    - Optional J2 or higher.
+- Burn modeling:
+  - `Burn` objects with:
+    - Time, location, Δv vector or thrust profile.
+    - Mass flow and fuel tracking.
+
+**Result:** one mission object can produce a full time history of states along the entire cruise.
+
+
+### 3.4 Long-Duration Operations
+
+For full-duration coverage (years):
+
+- Implement time-step control:
+  - Fine steps during intensive phases (EDL, burns).
+  - Coarser steps during quiet cruise or surface idle.
+- Aging models:
+  - Solar array degradation vs time/radiation.
+  - Battery fade vs cycles.
+- Ops cycles:
+  - Daily operations schedule on surface and/or on orbit.
+  - Periodic DSN passes with planning for data volume and latency.
+
+This needs the scheduler to support:
+- Event queues (time-based triggers).
+- Recurrent patterns (e.g., daily, weekly operations).
+
+
+### 3.5 Body & Environment Registry
+
+To be mission-agnostic:
+
+- Create a `BodyRegistry`:
+  - Holds:
+    - Name, mu, radius, rotation period.
+    - Default environment models (atmosphere, seasons).
+- Allow user to:
+  - Define custom bodies (e.g., fictional planets or asteroids).
+- Environment models:
+  - Atmospheric models per body (e.g., Earth IRISA, Mars exponential, Titan, etc.).
+  - Surface environment models for landers.
+
+The EDL, EPS, and probe env modules will consume these models instead of hard-coded constants.
+
+
+### 3.6 Data & Configuration Management
+
+For long-term reusability and porting:
+
+- Adopt a consistent configuration format (e.g., JSON/YAML/pyproject-like sections):
+  - `mission.yaml` describing:
+    - Bodies, assets, phases, events.
+- Add utilities to:
+  - Load mission configs into `MissionScenario` objects.
+  - Export simulation results to standardized JSON/CSV.
+- Maintain versioning:
+  - Include schema version in mission files.
+  - Provide upgrade tools between versions as PMP evolves.
+
+
+### 3.7 Visualization & Reporting
+
+To make full-duration simulation understandable:
+
+- Core plotting helpers:
+  - Trajectory plots (2D/3D).
+  - EDL alt/v/q vs time.
+  - EPS SOC vs time, energy per orbit.
+  - Comms link margins vs time.
+  - ADCS attitude and RW speeds vs time.
+- Reporting:
+  - Generate mission summary reports:
+    - Key mission events and margins.
+    - Performance metrics vs requirements.
+  - Export LaTeX/Markdown snippets for papers or docs.
+
+
+4. Outstanding Integration Tasks (Short List)
+---------------------------------------------
+
+- Wire up `pmp.missions.magpie`:
+  - Provide a single “MAGPIE baseline” function:
+    - Takes high-level parameters (launch window, landing sites).
+    - Calls transfer, EDL, probe env, EPS, comms, ADCS sims.
+    - Produces combined summary + key plots.
+- Move remaining MAGPIE scripts into `pmp/legacy/`:
+  - `antenna_0.4.py`
+  - `hex_v1.2a.py`
+  - `CFD_0.2.py`
+  - `comm1d.py`
+  - A complete `reentry_2.1c.py` when available.
+- Create thin wrappers if/when needed:
+  - `pmp/antenna` for rough gain calculations and NEC export.
+  - `pmp/structures` for crush-core/honeycomb modeling.
+  - `pmp/aero` or `pmp/cfd` hooks for ballistic coefficient and drag estimates.
+
+
+5. Summary
+----------
+
+PMP already has the beginnings of a **real mission framework**:
+
+- Generic Lambert transfer (multi-body capable via body map).
+- Mars seasons helper.
+- Generic EDL kernel.
+- Generic EPS simulator.
+- Probe environment/power/thermal wrapper (Mars-leaning but abstracted).
+- ADCS framework layer.
+- Comms link budgets (Mars-centric).
+- A cross-cutting GUI that exercises each subsystem.
+
+To grow into a **mission-agnostic, full-duration simulator**, PMP needs:
+
+- A unified `MissionScenario`/scheduler layer.
+- Asset classes for spacecraft, probes, and landers.
+- Generalized environment models and a body registry.
+- Aging and long-duration operational models.
+- More robust trajectory/propagation and LV modeling.
+- Deeper integration of ADCS, EPS, comms, and EDL into one coherent timeline.
+- Visualization and reporting to make multi-year simulations usable.
+
+The current structure and wrappers are compatible with this evolution:
+no major rewrites should be necessary, only progressive refactoring and
+new orchestration layers on top of the existing, tested kernels.
